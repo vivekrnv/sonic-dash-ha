@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Ok};
 use clap::Parser;
-use sonic_common::log;
+use sonic_common::log::{self, FileLogConfig};
 use sonic_common::SonicDbTable;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::{
@@ -46,7 +46,16 @@ struct Args {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    if let Err(e) = log::init("hamgrd", true) {
+    if let Err(e) = log::init(
+        "hamgrd",
+        true,
+        Some(FileLogConfig {
+            log_file_path: format!("/var/log/dash-ha/hamgrd-dpu{}.rec", args.slot_id as u8),
+            max_file_size_bytes: 1 << 26,
+            max_file_count: usize::MAX,
+            targets: vec!["swbus_actor::driver".to_string(), "hamgrd-recorder".to_string()],
+        }),
+    ) {
         eprintln!("Failed to initialize logging: {e}");
     }
 

@@ -59,7 +59,7 @@ impl Outgoing {
     /// Actor logic succeeded, so send out messages.
     pub(crate) async fn send_queued_messages(&mut self) {
         for msg in self.queued_messages.drain(..) {
-            debug!("Sending message: {msg:?}");
+            debug!(target:"hamgrd-recorder", "Sending message: {msg:?}");
             self.swbus_client
                 .send_raw(msg.swbus_message.clone())
                 .await

@@ -18,6 +18,7 @@ tracing.workspace = true
 tracing-error.workspace = true
 tracing-subscriber.workspace = true
 syslog-tracing.workspace = true
+file-rotate.workspace = true
 better-panic.workspace = true
 human-panic.workspace = true
 signal-hook.workspace = true

@@ -20,7 +20,7 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    if let Err(e) = log::init("swbusd", true) {
+    if let Err(e) = log::init("swbusd", true, None) {
         eprintln!("Failed to initialize logging: {e}");
     }
     info!("Starting swbusd");

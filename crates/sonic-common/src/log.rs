@@ -1,4 +1,5 @@
 use color_eyre::eyre::{Context, Result};
+use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
 
@@ -13,6 +14,19 @@ use tracing_subscriber::{
     self, filter, fmt, fmt::format::FmtSpan, prelude::__tracing_subscriber_SubscriberExt, reload,
     util::SubscriberInitExt, Layer, Registry,
 };
+
+/// Configuration for logging specific module targets to an independent file.
+pub struct FileLogConfig {
+    /// Full path to the log file. Rotated files will be named `{path}.1`, `{path}.2`, etc.
+    pub log_file_path: String,
+    /// Maximum size in bytes before the log file is rotated.
+    pub max_file_size_bytes: usize,
+    /// Number of rotated files to keep (e.g. 5 means file, file.1, ..., file.5).
+    pub max_file_count: usize,
+    /// Module target prefixes to route to the file (e.g. `["hamgrd::actors", "swbus_core"]`).
+    /// Log records whose target starts with any of these prefixes are written to the file.
+    pub targets: Vec<String>,
+}
 
 lazy_static! {
     static ref LOG_FOR_TEST_INIT: Mutex<bool> = Mutex::new(false);
@@ -60,7 +74,10 @@ impl LoggerConfigChangeHandler for LoggerConfigHandler {
 ///   by modifying config_db. The settings include
 ///   - log_level: emerg, alert, crit, error, warn, notice, info, debug
 ///   - output: stdout, stderr, syslog. Rust doesn't support dynamically changing log output. We will only support default output (syslog in linux, file in windows)
-pub fn init(program_name: &'static str, link_swsscommon_logger: bool) -> Result<()> {
+/// * If file_log is provided, an additional file logging layer is created that writes records matching the specified
+///   module targets to a size-based, rotating log file (see FileLogConfig for size and count limits). This is independent
+///   of the main syslog/file output.
+pub fn init(program_name: &'static str, link_swsscommon_logger: bool, file_log: Option<FileLogConfig>) -> Result<()> {
     let log_level_env_var = format!("{}_LOG_LEVEL", program_name.to_uppercase());
 
     let mut log_env_set = true;
@@ -76,6 +93,7 @@ pub fn init(program_name: &'static str, link_swsscommon_logger: bool) -> Result<
     );
 
     let file_subscriber = new_file_subscriber(program_name).wrap_err("Unable to create file subscriber.")?;
+    let file_log_layer = new_independent_file_layer(file_log)?;
 
     #[cfg(not(target_os = "windows"))]
     if link_swsscommon_logger && !log_env_set {
@@ -92,10 +110,14 @@ pub fn init(program_name: &'static str, link_swsscommon_logger: bool) -> Result<
                 .with_target(false)
                 .with_ansi(false);
 
-            tracing_subscriber::registry()
-                .with(level_layer.and_then(file_subscriber))
-                .with(ErrorLayer::default())
-                .init();
+            let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
+            layers.push(Box::new(level_layer.and_then(file_subscriber)));
+            if let Some(fl) = file_log_layer {
+                layers.push(fl);
+            }
+            layers.push(Box::new(ErrorLayer::default()));
+
+            tracing_subscriber::registry().with(layers).init();
             return Ok(());
         } else {
             eprintln!("Unable to link to swsscommon logger: {}", result.unwrap_err());
@@ -110,12 +132,61 @@ pub fn init(program_name: &'static str, link_swsscommon_logger: bool) -> Result<
         .with_ansi(false)
         .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE);
 
-    tracing_subscriber::registry()
-        .with(filter.and_then(file_subscriber))
-        .with(ErrorLayer::default())
-        .init();
+    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
+    layers.push(Box::new(filter.and_then(file_subscriber)));
+    if let Some(fl) = file_log_layer {
+        layers.push(fl);
+    }
+    layers.push(Box::new(ErrorLayer::default()));
+
+    tracing_subscriber::registry().with(layers).init();
 
     Ok(())
+}
+
+/// Creates an optional independent file logging layer.
+/// When `file_log` is `Some`, returns a boxed layer that writes log records whose target starts
+/// with any of the configured prefixes to a size-rotated file (like syslog: file, file.1, file.2, etc.).
+fn new_independent_file_layer(
+    file_log: Option<FileLogConfig>,
+) -> Result<Option<Box<dyn Layer<Registry> + Send + Sync>>> {
+    use file_rotate::{compression::Compression, suffix::AppendCount, ContentLimit, FileRotate};
+
+    let config = match file_log {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    let log_path = Path::new(&config.log_file_path);
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).wrap_err(format!("Unable to create log directory: {:?}", parent))?;
+    }
+
+    let file_rotate = FileRotate::new(
+        log_path,
+        AppendCount::new(config.max_file_count),
+        ContentLimit::Bytes(config.max_file_size_bytes),
+        Compression::OnRotate(2),
+        #[cfg(unix)]
+        None,
+    );
+    let file_rotate = Mutex::new(file_rotate);
+
+    let targets = config.targets;
+    let mut target_filter = filter::Targets::new();
+    for prefix in &targets {
+        target_filter = target_filter.with_target(prefix.clone(), filter::LevelFilter::TRACE);
+    }
+
+    let layer = fmt::layer()
+        .with_writer(file_rotate)
+        .with_line_number(true)
+        .with_target(true)
+        .with_ansi(false)
+        .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+        .with_filter(target_filter);
+
+    Ok(Some(Box::new(layer)))
 }
 
 #[cfg(target_os = "windows")]
@@ -204,7 +275,7 @@ pub fn init_logger_for_test() {
 mod test {
     #[test]
     fn log_can_be_initialized() {
-        let result = super::init("test", true);
+        let result = super::init("test", true, None);
         assert!(result.is_ok());
     }
 }
