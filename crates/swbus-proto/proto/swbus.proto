@@ -206,6 +206,7 @@ message ManagementRequestArg {
 enum ManagementRequestType {
   MANAGEMENT_REQUEST_TYPE_SWBUSD_GET_ROUTES = 0;
   MANAGEMENT_REQUEST_TYPE_HAMGRD_GET_ACTOR_STATE = 1;
+  MANAGEMENT_REQUEST_TYPE_SWBUSD_RESOLVE_PEER_SP = 2;
 }
 //
 // Management requests for debugging purpose

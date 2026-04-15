@@ -207,6 +207,53 @@ where
                 );
                 Ok(response_msg)
             }
+            ManagementRequestType::SwbusdResolvePeerSp => {
+                debug!("Received resolve_peer_sp request");
+                let endpoint_str = mgmt_request
+                    .arguments
+                    .iter()
+                    .find(|arg| arg.name == "endpoint")
+                    .map(|arg| arg.value.as_str())
+                    .ok_or_else(|| {
+                        SwbusError::input(SwbusErrorCode::InvalidArgs, "Missing 'endpoint' argument".to_string())
+                    })?;
+
+                let endpoint: std::net::SocketAddr = endpoint_str.parse().map_err(|e| {
+                    SwbusError::input(
+                        SwbusErrorCode::InvalidArgs,
+                        format!("Invalid endpoint address '{endpoint_str}': {e}"),
+                    )
+                })?;
+
+                match self.mux.resolve_peer_sp(&endpoint) {
+                    Ok(sp) => {
+                        let sp_str = sp.to_longest_path();
+                        debug!("Resolved peer SP for {}: {}", endpoint, sp_str);
+                        let response_msg = SwbusMessage::new_response(
+                            request_header,
+                            Some(self.mux.get_my_service_path()),
+                            SwbusErrorCode::Ok,
+                            "",
+                            self.mux.generate_message_id(),
+                            Some(request_response::ResponseBody::ManagementQueryResult(
+                                ManagementQueryResult { value: sp_str },
+                            )),
+                        );
+                        Ok(response_msg)
+                    }
+                    Err(e) => {
+                        let response_msg = SwbusMessage::new_response(
+                            request_header,
+                            Some(self.mux.get_my_service_path()),
+                            SwbusErrorCode::NoRoute,
+                            &format!("{e}"),
+                            self.mux.generate_message_id(),
+                            None,
+                        );
+                        Ok(response_msg)
+                    }
+                }
+            }
             _ => Err(SwbusError::input(
                 SwbusErrorCode::InvalidArgs,
                 format!("Invalid management request: {:?}", mgmt_request),

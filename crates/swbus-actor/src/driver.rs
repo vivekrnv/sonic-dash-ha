@@ -42,7 +42,7 @@ impl<A: Actor> ActorDriver<A> {
 
         loop {
             tokio::select! {
-                _ = self.state.outgoing.drive_resend_loop() => unreachable!("drive_resend_loop never returns"),
+                _ = self.state.outgoing.drive_maintenance_loop() => unreachable!("drive_maintenance_loop never returns"),
                 maybe_msg = self.swbus_edge.recv() => {
                     if let Some(maybe_msg) = maybe_msg {
                         self.handle_swbus_message(maybe_msg).await;

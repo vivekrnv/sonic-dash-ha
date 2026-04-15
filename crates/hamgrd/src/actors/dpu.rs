@@ -252,15 +252,12 @@ impl DpuActor {
                 None
             }
         };
-        let final_state = match (&dpu_state, &bfd_probe_state) {
-            (Some(dpu_state), Some(bfd_probe_state)) => {
-                let pmon_dpu_up = dpu_state.dpu_midplane_link_state == DpuPmonStateType::Up
+
+        let final_state = match &dpu_state {
+            Some(dpu_state) => {
+                dpu_state.dpu_midplane_link_state == DpuPmonStateType::Up
                     && dpu_state.dpu_control_plane_state == DpuPmonStateType::Up
-                    && dpu_state.dpu_data_plane_state == DpuPmonStateType::Up;
-                // bfd is considered up if there is at least one v4 session up to any peer
-                let bfd_dpu_up =
-                    !bfd_probe_state.v4_bfd_up_sessions.is_empty() || !bfd_probe_state.v6_bfd_up_sessions.is_empty();
-                pmon_dpu_up && bfd_dpu_up
+                    && dpu_state.dpu_data_plane_state == DpuPmonStateType::Up
             }
             _ => false,
         };
@@ -543,7 +540,8 @@ mod test {
         let dpu_pmon_down_state = make_dpu_pmon_state(false);
         let dpu_bfd_up_state = make_dpu_bfd_state(vec!["10.0.0.0", "10.0.1.0", "10.0.2.0", "10.0.3.0"], vec![]);
         let dpu_bfd_down_state = make_dpu_bfd_state(vec![], vec![]);
-        let dpu_actor_state_wo_bfd = make_local_dpu_actor_state(0, 0, true, Some(dpu_pmon_up_state.clone()), None);
+        let mut dpu_actor_state_wo_bfd = make_local_dpu_actor_state(0, 0, true, Some(dpu_pmon_up_state.clone()), None);
+        dpu_actor_state_wo_bfd.up = true;
         let dash_global_cfg = make_dash_ha_global_config();
         let dash_global_cfg_fvs = serde_json::to_value(to_field_values(&dash_global_cfg).unwrap()).unwrap();
 
@@ -556,7 +554,6 @@ mod test {
         dpu_actor_pmon_down_state.dpu_pmon_state = Some(dpu_pmon_down_state.clone());
 
         let mut dpu_actor_bfd_down_state = dpu_actor_up_state.clone();
-        dpu_actor_bfd_down_state.up = false;
         dpu_actor_bfd_down_state.dpu_bfd_state = Some(dpu_bfd_down_state.clone());
 
         let dpu_fvs = serde_json::to_value(to_field_values(&to_local_dpu(&dpu_actor_state_wo_bfd)).unwrap()).unwrap();

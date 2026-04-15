@@ -230,7 +230,7 @@ where
 
             Ok(sessions)
         }
-        None => Ok(Vec::new()), // Use empty vector when field is missing
+        _ => Ok(Vec::new()), // Use empty vector when field is missing
     }
 }
 
@@ -260,7 +260,7 @@ where
             let naive = chrono::NaiveDateTime::parse_from_str(s, TIMESTAMP_FORMAT).map_err(de::Error::custom)?;
             Ok(naive.and_utc().timestamp_millis())
         }
-        None => Ok(now_in_millis()), // Use default when field is missing
+        _ => Ok(now_in_millis()), // Use default when field is missing
     }
 }
 
@@ -308,6 +308,42 @@ pub struct DashHaSetTable {
     pub dp_channel_probe_fail_threshold: Option<u32>,
 }
 
+/// <https://github.com/sonic-net/SONiC/blob/master/doc/smart-switch/high-availability/smart-switch-ha-detailed-design.md#2313-flow-sync-sessions>
+#[skip_serializing_none]
+#[derive(Serialize, Deserialize, Default, PartialEq, Eq, SonicDb)]
+#[sonicdb(
+    table_name = "DASH_FLOW_SYNC_SESSION_TABLE",
+    key_separator = ":",
+    db_name = "DPU_APPL_DB",
+    is_dpu = "true"
+)]
+pub struct DashFlowSyncSessionTable {
+    #[serde(rename = "type")]
+    pub session_type: String,
+    pub ha_set_id: String,
+    pub target_server_ip: String,
+    pub target_server_port: u16,
+    pub timeout: u32,
+}
+
+/// <https://github.com/sonic-net/SONiC/blob/master/doc/smart-switch/high-availability/smart-switch-ha-detailed-design.md#2343-flow-sync-session-states>
+#[skip_serializing_none]
+#[derive(Serialize, Deserialize, Default, PartialEq, Eq, SonicDb)]
+#[sonicdb(
+    table_name = "DASH_FLOW_SYNC_SESSION_STATE",
+    key_separator = "|",
+    db_name = "DPU_STATE_DB",
+    is_dpu = "true"
+)]
+pub struct DashFlowSyncSessionState {
+    #[serde(rename = "type")]
+    pub session_type: String,
+    pub state: String,
+    pub creation_time_in_ms: i64,
+    pub last_state_start_time_in_ms: i64,
+    pub output_file: Option<String>,
+}
+
 /// <https://github.com/sonic-net/SONiC/blob/master/doc/vxlan/Overlay%20ECMP%20ehancements.md#22-app-db>
 #[skip_serializing_none]
 #[serde_as]
@@ -340,13 +376,14 @@ pub struct VnetRouteTunnelTable {
 )]
 pub struct DashHaScopeTable {
     pub version: u32,
-    pub disabled: bool,
+    pub disabled: Option<bool>,
     pub ha_role: String,
+    pub ha_term: String,
     pub ha_set_id: String,
-    pub vip_v4: String,
+    pub vip_v4: Option<String>,
     pub vip_v6: Option<String>,
-    pub flow_reconcile_requested: bool,
-    pub activate_role_requested: bool,
+    pub flow_reconcile_requested: Option<bool>,
+    pub activate_role_requested: Option<bool>,
 }
 
 /// <https://github.com/sonic-net/SONiC/blob/master/doc/smart-switch/high-availability/smart-switch-ha-detailed-design.md#2342-ha-scope-state>
@@ -365,9 +402,11 @@ pub struct DpuDashHaScopeState {
     // The time when HA role is moved into current one in milliseconds.
     pub ha_role_start_time: i64,
     // The current term confirmed by ASIC.
-    pub ha_term: String,
+    pub ha_term: Option<String>,
     // The DPU ha state.
     pub ha_state: String,
+    // The time when HA state is moved into current one in milliseconds.
+    pub ha_state_start_time: i64,
     // DPU is pending on role activation.
     #[serde(default)]
     pub activate_role_pending: bool,
@@ -377,6 +416,23 @@ pub struct DpuDashHaScopeState {
     // Brainsplit is detected, and DPU is pending on recovery.
     #[serde(default)]
     pub brainsplit_recover_pending: bool,
+}
+
+/// <https://github.com/sonic-net/SONiC/blob/master/doc/smart-switch/high-availability/smart-switch-ha-detailed-design.md#2341-ha-set-state>
+#[derive(Debug, Deserialize, Serialize, PartialEq, Default, Clone, SonicDb)]
+#[sonicdb(
+    table_name = "DASH_HA_SET_STATE_TABLE",
+    key_separator = "|",
+    db_name = "DPU_STATE_DB",
+    is_dpu = "true"
+)]
+pub struct DpuDashHaSetState {
+    // HA set ID
+    pub ha_set_id: String,
+    // The last update time of this state in milliseconds.
+    pub last_updated_time: i64,
+    // Data plane channel is alive or not.
+    pub dp_channel_is_alive: bool,
 }
 
 /// DPU Reset Information written to STATE_DB.
@@ -398,7 +454,7 @@ pub struct DpuResetInfo {
 /// <https://github.com/sonic-net/SONiC/blob/master/doc/smart-switch/high-availability/smart-switch-ha-detailed-design.md#2342-ha-scope-state>
 #[skip_serializing_none]
 #[serde_as]
-#[derive(Debug, Deserialize, Serialize, PartialEq, Default, Clone, SonicDb)]
+#[derive(Debug, Deserialize, Serialize, Eq, PartialEq, Default, Clone, SonicDb)]
 #[sonicdb(table_name = "DASH_HA_SCOPE_STATE", key_separator = "|", db_name = "STATE_DB")]
 pub struct NpuDashHaScopeState {
     // HA scope creation time in milliseconds.
@@ -416,7 +472,6 @@ pub struct NpuDashHaScopeState {
     pub peer_ip: String,
 
     // The state of the HA state machine. This is the state in NPU hamgrd.
-    // The state of the HA state machine. This is the state in NPU hamgrd.
     pub local_ha_state: Option<String>,
     // The time when local target HA state is set.
     pub local_ha_state_last_updated_time_in_ms: Option<i64>,
@@ -432,6 +487,8 @@ pub struct NpuDashHaScopeState {
     pub local_acked_term: Option<String>,
     // The state of the HA state machine in peer DPU.
     pub peer_ha_state: Option<String>, /*todo: we don't know peer dpu state */
+    // The timestamp of the update of peer_ha_state
+    pub peer_ha_state_last_updated_time_in_ms: Option<i64>,
     // The current term in peer DPU.
     pub peer_term: Option<String>,
 
@@ -503,6 +560,29 @@ pub fn get_dpu_config_from_db(dpu_id: u32) -> Result<Dpu> {
         }
     }
     Err(anyhow::anyhow!("DPU entry not found for slot {}", dpu_id))
+}
+
+/// Look up the REMOTE_DPU entry corresponding to a peer vDPU ID.
+///
+/// Resolution chain: VDPU|{vdpu_id} → main_dpu_ids → REMOTE_DPU|{dpu_key}
+pub fn get_remote_dpu_for_vdpu(vdpu_id: &str) -> Result<RemoteDpu> {
+    // Step 1: Read the VDPU entry to get the main DPU ID
+    let db = DbConnector::new_named("CONFIG_DB", false, 0).context("connecting config_db for VDPU lookup")?;
+    let vdpu_table = Table::new(db, "VDPU").context("opening VDPU table")?;
+    let vdpu: VDpu = from_table(&vdpu_table, vdpu_id).context(format!("reading VDPU entry {vdpu_id}"))?;
+
+    let dpu_key = vdpu
+        .main_dpu_ids
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("VDPU entry {vdpu_id} has empty main_dpu_ids"))?;
+
+    // Step 2: Read the REMOTE_DPU entry using the DPU key
+    let db = DbConnector::new_named("CONFIG_DB", false, 0).context("connecting config_db for REMOTE_DPU lookup")?;
+    let remote_dpu_table = Table::new(db, "REMOTE_DPU").context("opening REMOTE_DPU table")?;
+    let remote_dpu: RemoteDpu =
+        from_table(&remote_dpu_table, dpu_key).context(format!("reading REMOTE_DPU entry {dpu_key}"))?;
+
+    Ok(remote_dpu)
 }
 
 #[skip_serializing_none]
@@ -831,5 +911,24 @@ mod test {
         let bfd_state2: DashBfdProbeState = swss_serde::from_field_values(&serialized_fvs).unwrap();
         assert_eq!(bfd_state.v4_bfd_up_sessions, bfd_state2.v4_bfd_up_sessions);
         assert_eq!(bfd_state.v6_bfd_up_sessions, bfd_state2.v6_bfd_up_sessions);
+    }
+
+    #[test]
+    fn test_deserialize_dpu_ha_scope_state_without_term() {
+        let json = r#"
+        {
+            "last_updated_time": "100",
+            "ha_role": "standby",
+            "ha_role_start_time": "101",
+            "ha_state": "standby",
+            "ha_state_start_time": "102"
+        }"#;
+
+        let fvs: FieldValues = serde_json::from_str(json).unwrap();
+        let ha_scope_state: DpuDashHaScopeState = swss_serde::from_field_values(&fvs).unwrap();
+
+        assert_eq!(ha_scope_state.ha_term, None);
+        assert_eq!(ha_scope_state.ha_role, "standby");
+        assert_eq!(ha_scope_state.ha_state, "standby");
     }
 }

@@ -14,11 +14,13 @@ use tokio::time::{interval, Interval};
 use tracing::debug;
 
 const RESEND_TIME: Duration = Duration::from_secs(60);
+const MAINTENANCE_POLL_TIME: Duration = Duration::from_secs(1);
 
 /// Outgoing state table - messages to send to other actors.
 pub struct Outgoing {
     swbus_client: Arc<SimpleSwbusEdgeClient>,
-    resend_interval: Interval,
+    maintenance_interval: Interval,
+    last_resend_time: SystemTime,
     unacked_messages: HashMap<MessageId, UnackedMessage>,
 
     /// Messages that will be sent if the actor logic succeeds, or dropped if it fails.
@@ -44,12 +46,26 @@ impl Outgoing {
         });
     }
 
+    pub fn send_with_delay(&mut self, dest: ServicePath, msg: ActorMessage, delay: Duration) {
+        let swbus_message = actor_msg_to_swbus_msg(&msg, dest, &self.swbus_client);
+        let now = SystemTime::now();
+        let time_sent = now.checked_add(delay).expect("SystemTime overflowed!");
+        self.queued_messages.push({
+            UnackedMessage {
+                actor_message: msg,
+                swbus_message,
+                time_sent,
+            }
+        });
+    }
+
     pub(crate) fn new(swbus_client: Arc<SimpleSwbusEdgeClient>) -> Self {
-        let mut resend_interval = interval(RESEND_TIME);
-        resend_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut maintenance_interval = interval(MAINTENANCE_POLL_TIME);
+        maintenance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Self {
             swbus_client,
-            resend_interval,
+            maintenance_interval,
+            last_resend_time: SystemTime::now(),
             unacked_messages: HashMap::new(),
             queued_messages: Vec::new(),
             sent_messages: HashMap::new(),
@@ -58,7 +74,14 @@ impl Outgoing {
 
     /// Actor logic succeeded, so send out messages.
     pub(crate) async fn send_queued_messages(&mut self) {
+        let mut delayed_messages: Vec<UnackedMessage> = Vec::new();
         for msg in self.queued_messages.drain(..) {
+            if SystemTime::now() < msg.time_sent {
+                // The message hasn't reach its sending time yet
+                delayed_messages.push(msg);
+                continue;
+            }
+
             debug!(target:"hamgrd-recorder", "Sending message: {msg:?}");
             self.swbus_client
                 .send_raw(msg.swbus_message.clone())
@@ -79,6 +102,11 @@ impl Outgoing {
 
             // Add to unacked messages/resend queue
             self.unacked_messages.insert(id, msg);
+        }
+
+        // requeue all the delayed messages
+        for msg in delayed_messages.drain(..) {
+            self.queued_messages.push(msg);
         }
     }
 
@@ -112,10 +140,24 @@ impl Outgoing {
         }
     }
 
-    /// Run the resend/maintenence loop. Returned future must be polled to run it.
-    pub(crate) async fn drive_resend_loop(&mut self) {
+    /// Run the maintenance loop: drain delayed messages and resend unacked messages.
+    /// Returned future must be polled to run it.
+    pub(crate) async fn drive_maintenance_loop(&mut self) {
         loop {
-            self.resend_interval.tick().await;
+            self.maintenance_interval.tick().await;
+
+            // Drain delayed messages whose send time has arrived
+            if !self.queued_messages.is_empty() {
+                self.send_queued_messages().await;
+            }
+
+            // Resend unacked messages periodically
+            let now = SystemTime::now();
+            let elapsed = now.duration_since(self.last_resend_time).unwrap_or(Duration::ZERO);
+            if elapsed < RESEND_TIME {
+                continue;
+            }
+            self.last_resend_time = now;
 
             // Drop messages that have been unacked for over an hour, as a memory leak failsafe
             self.unacked_messages
@@ -123,7 +165,7 @@ impl Outgoing {
 
             // Resend unacked messages
             for msg in self.unacked_messages.values() {
-                if Duration::from_secs(get_elapsed_time(&msg.time_sent)) >= self.resend_interval.period() {
+                if Duration::from_secs(get_elapsed_time(&msg.time_sent)) >= RESEND_TIME {
                     self.swbus_client
                         .send_raw(msg.swbus_message.clone())
                         .await

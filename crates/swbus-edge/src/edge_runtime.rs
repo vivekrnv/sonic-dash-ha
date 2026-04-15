@@ -3,15 +3,18 @@ use crate::message_handler_proxy::SwbusMessageHandlerProxy;
 use crate::message_router::SwbusMessageRouter;
 use crate::RuntimeEnv;
 use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::RwLock;
+use swbus_proto::message_id_generator::MessageIdGenerator;
 use swbus_proto::result::*;
 use swbus_proto::swbus::*;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::RwLock as AsyncRwLock;
-use tracing::info;
+use tokio::time::{timeout, Duration};
+use tracing::{debug, info};
 pub(crate) const SWBUS_RECV_QUEUE_SIZE: usize = 10000;
 
 pub struct SwbusEdgeRuntime {
@@ -123,6 +126,92 @@ impl SwbusEdgeRuntime {
 
     pub async fn swbusd_connected(&self) -> bool {
         self.tx_to_swbusd.read().await.is_some()
+    }
+
+    /// Resolve a remote peer's ServicePath by querying the local swbusd for the peer connection
+    /// matching the given endpoint (npu_ip:swbus_port).
+    ///
+    /// This sends a `SwbusdResolvePeerSp` management request to the local swbusd and returns
+    /// the remote node's ServicePath parsed from the response.
+    pub async fn resolve_peer_sp(&self, endpoint: SocketAddr) -> Result<ServicePath> {
+        // Create a temporary handler to receive the response
+        let id_generator = MessageIdGenerator::new();
+        let temp_sp = {
+            let mut sp = self.base_sp.clone();
+            sp.resource_type = "_resolve_peer".to_string();
+            sp.resource_id = format!("{}", id_generator.generate());
+            sp
+        };
+        let (handler_tx, mut handler_rx) = mpsc::channel::<SwbusMessage>(1);
+        self.add_handler(temp_sp.clone(), handler_tx);
+
+        // Build the management request targeted at the local swbusd
+        let swbusd_sp = self.base_sp.to_swbusd_service_path();
+        let msg_id = id_generator.generate();
+        let mut mgmt_request = ManagementRequest::new(ManagementRequestType::SwbusdResolvePeerSp);
+        mgmt_request.arguments.push(ManagementRequestArg {
+            name: "endpoint".to_string(),
+            value: endpoint.to_string(),
+        });
+
+        let message = SwbusMessage {
+            header: Some(SwbusMessageHeader::new(temp_sp.clone(), swbusd_sp, msg_id)),
+            body: Some(swbus_message::Body::ManagementRequest(mgmt_request)),
+        };
+
+        // Send the request
+        self.send(message).await?;
+
+        // Wait for response with timeout
+        let result = timeout(Duration::from_secs(5), handler_rx.recv()).await;
+
+        // Clean up the temporary handler
+        self.remove_handler(&temp_sp);
+
+        let response_msg = result
+            .map_err(|_| {
+                SwbusError::connection(
+                    SwbusErrorCode::Timeout,
+                    io::Error::new(io::ErrorKind::TimedOut, "resolve_peer_sp timed out"),
+                )
+            })?
+            .ok_or_else(|| {
+                SwbusError::connection(
+                    SwbusErrorCode::ConnectionError,
+                    io::Error::new(io::ErrorKind::ConnectionAborted, "Handler channel closed"),
+                )
+            })?;
+
+        // Parse the response
+        let body = response_msg
+            .body
+            .ok_or_else(|| SwbusError::input(SwbusErrorCode::InvalidPayload, "Empty response body".to_string()))?;
+
+        match body {
+            swbus_message::Body::Response(resp) => {
+                let error_code = SwbusErrorCode::try_from(resp.error_code).unwrap_or(SwbusErrorCode::UnknownError);
+                if error_code != SwbusErrorCode::Ok {
+                    return Err(SwbusError::input(
+                        error_code,
+                        format!("resolve_peer_sp failed: {}", resp.error_message),
+                    ));
+                }
+                match resp.response_body {
+                    Some(request_response::ResponseBody::ManagementQueryResult(result)) => {
+                        debug!("Resolved peer SP: {}", result.value);
+                        ServicePath::from_string(&result.value)
+                    }
+                    _ => Err(SwbusError::input(
+                        SwbusErrorCode::InvalidPayload,
+                        "Unexpected response body type".to_string(),
+                    )),
+                }
+            }
+            _ => Err(SwbusError::input(
+                SwbusErrorCode::InvalidPayload,
+                "Unexpected Response message".to_string(),
+            )),
+        }
     }
 }
 

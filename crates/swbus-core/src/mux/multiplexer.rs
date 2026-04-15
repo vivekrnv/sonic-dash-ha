@@ -674,6 +674,21 @@ impl SwbusMultiplexer {
         self.connections.iter().map(|conn| conn.clone()).collect()
     }
 
+    /// Resolve a peer's ServicePath by looking up a connection whose remote address matches the given endpoint.
+    pub fn resolve_peer_sp(&self, endpoint: &std::net::SocketAddr) -> Result<ServicePath> {
+        for conn in self.connections.iter() {
+            if conn.remote_addr() == *endpoint {
+                if let Some(sp) = conn.remote_service_path() {
+                    return Ok(sp.clone());
+                }
+            }
+        }
+        Err(SwbusError::input(
+            SwbusErrorCode::NoRoute,
+            format!("No peer connection found for endpoint {endpoint}"),
+        ))
+    }
+
     pub fn shutdown(&mut self) {
         if let Some(tx) = &self.route_announer_ct {
             tx.cancel();

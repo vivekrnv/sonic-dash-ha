@@ -6,7 +6,8 @@ use swbus_proto::{
     result::Result,
     swbus::{
         request_response::ResponseBody, swbus_message::Body, DataRequest, ManagementQueryResult, ManagementRequest,
-        ManagementRequestType, RequestResponse, ServicePath, SwbusErrorCode, SwbusMessage, SwbusMessageHeader,
+        ManagementRequestArg, ManagementRequestType, RequestResponse, ServicePath, SwbusErrorCode, SwbusMessage,
+        SwbusMessageHeader,
     },
 };
 use tokio::sync::{
@@ -182,7 +183,16 @@ impl SimpleSwbusEdgeClient {
                         response_body,
                     })
                 }
-                MessageBody::ManagementRequest { .. } => unimplemented!(),
+                MessageBody::ManagementRequest { request, args } => {
+                    let arguments = args
+                        .into_iter()
+                        .map(|(name, value)| ManagementRequestArg { name, value })
+                        .collect();
+                    Body::ManagementRequest(ManagementRequest {
+                        request: request.into(),
+                        arguments,
+                    })
+                }
             }),
         };
         (id, msg)
