@@ -11,15 +11,30 @@ use swbus_config::SwbusConfig;
 use swbus_proto::result::*;
 use swbus_proto::swbus::swbus_service_server::{SwbusService, SwbusServiceServer};
 use swbus_proto::swbus::*;
+use tokio::net::TcpListener;
 use tokio::sync::{
     mpsc,
     oneshot::{self, Receiver, Sender},
 };
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
 use tonic::{transport::Server, Request, Response, Status, Streaming};
 use tracing::*;
+
+const LISTENER_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+async fn bind_listener_with_retry(addr: SocketAddr, retry_interval: std::time::Duration) -> TcpListener {
+    loop {
+        match TcpListener::bind(addr).await {
+            Ok(listener) => return listener,
+            Err(error) => {
+                warn!(%addr, %error, "Failed to bind swbus listener; retrying");
+                tokio::time::sleep(retry_interval).await;
+            }
+        }
+    }
+}
 
 pub struct SwbusServiceHost {
     swbus_server_addr: SocketAddr,
@@ -66,6 +81,8 @@ impl SwbusServiceHost {
             ));
         }
 
+        let listener = bind_listener_with_retry(addr, LISTENER_RETRY_INTERVAL).await;
+
         // create mux and set route announce task queue
         let mut mux = SwbusMultiplexer::new(config.routes);
         let (route_annouce_task_tx, route_annouce_task_rx) = mpsc::channel::<RouteAnnounceTask>(100);
@@ -95,7 +112,7 @@ impl SwbusServiceHost {
 
         Server::builder()
             .add_service(SwbusServiceServer::new(self))
-            .serve_with_shutdown(addr, async {
+            .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                 shutdown_rx.await.ok();
                 info!("SwbusServiceServer received shutdown signal");
                 conn_store_clone.shutdown().await;
@@ -104,7 +121,7 @@ impl SwbusServiceHost {
             .map_err(|e| {
                 SwbusError::connection(
                     SwbusErrorCode::ConnectionError,
-                    io::Error::other(format!("Failed to listen at {addr}: {e}")),
+                    io::Error::other(format!("Failed to serve at {addr}: {e}")),
                 )
             })?;
         debug!("SwbusServiceServer terminated");
@@ -183,5 +200,26 @@ impl SwbusService for SwbusServiceHost {
             .insert(SWBUS_SERVER_SERVICE_PATH, server_service_path.parse().unwrap());
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+    use tokio::time::{timeout, Duration};
+
+    #[tokio::test]
+    async fn listener_bind_retries_until_address_is_available() {
+        let occupied_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = occupied_listener.local_addr().unwrap();
+        let bind_task = tokio::spawn(bind_listener_with_retry(addr, Duration::from_millis(10)));
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(!bind_task.is_finished());
+
+        drop(occupied_listener);
+        let listener = timeout(Duration::from_secs(1), bind_task).await.unwrap().unwrap();
+        assert_eq!(listener.local_addr().unwrap(), addr);
     }
 }
